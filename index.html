@@ -1,25 +1,211 @@
-<!doctype html>
-<html lang="ko"><head><meta charset="utf-8">
+<!doctype html><html lang="ko"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
-<link rel="manifest" href="manifest.json"><meta name="apple-mobile-web-app-capable" content="yes">
-<title>SpaceAudio 보행 보조 (실험용)</title>
+<meta name="apple-mobile-web-app-capable" content="yes"><title>AI 보행 보조 (시연용)</title>
 <style>
-body{margin:0;background:#111;color:#fff;font:18px system-ui,sans-serif;padding:env(safe-area-inset-top) 12px env(safe-area-inset-bottom)}
-#stage{position:relative;margin:8px 0}video,canvas{width:100%;display:block;border-radius:8px;background:#222}
-canvas{position:absolute;inset:0;background:none}
-button,.btn{display:block;box-sizing:border-box;text-align:center;width:100%;min-height:60px;font-size:20px;font-weight:700;border:0;border-radius:12px;margin:6px 0;background:#444;color:#fff;line-height:60px}
-#go{background:#2d7ff9;font-size:24px;min-height:72px}#go.on{background:#d33}
-#quiz{display:none;grid-template-columns:repeat(4,1fr);gap:6px}#quiz button{min-height:56px;margin:0;line-height:1}
-#status{min-height:3em;font-size:15px}.warn{font-size:13px;color:#fb4}details{margin:8px 0}summary{min-height:44px;line-height:44px}
-</style></head><body><main>
-<div id="stage"><video id="v" playsinline muted></video><canvas id="o" width="256" height="192"></canvas></div>
-<p id="status" role="status" aria-live="polite">대기 중</p>
-<button id="go" aria-label="보조 기능 시작">보조 시작</button>
-<details><summary>설정 · 테스트</summary>
-<button id="test">3D 소리 테스트 (시계 방향 순회)</button>
-<button id="qz">방향 인식 퀴즈</button><div id="quiz"></div>
-<button id="flip">카메라 전환</button>
-<label class="btn">녹화 영상으로 테스트<input id="file" type="file" accept="video/*" hidden></label>
-<button id="log">로그 CSV 저장</button></details>
-<p class="warn">실험용 프로토타입입니다. 백색지팡이·안내견을 대체하지 않으며 안전이 검증되지 않았습니다. 이어폰(개방형/골전도 권장)을 사용하세요.</p>
-</main><script type="module" src="app.js"></script></body></html>
+html,body{margin:0;height:100%;background:#000;color:#ffeb3b;font-family:-apple-system,"Noto Sans KR",sans-serif}
+#app{display:flex;flex-direction:column;height:100dvh;padding:env(safe-area-inset-top) 0 env(safe-area-inset-bottom)}
+#bar{display:flex;gap:8px;padding:8px 12px;font-size:13px;font-weight:700}
+#bar span{flex:1;padding:6px;border:2px solid #ffeb3b;border-radius:8px;text-align:center}
+#stage{position:relative;flex:1;min-height:0;background:#111}
+#v,#o{position:absolute;inset:0;width:100%;height:100%;object-fit:contain}
+#info{padding:8px 12px;font-size:22px;line-height:1.35;min-height:92px}
+#said{color:#fff;font-size:20px;margin-top:4px}
+#btns{display:flex;gap:10px;padding:8px 12px 12px}
+button{flex:1;height:72px;font-size:17px;font-weight:800;border-radius:16px;border:3px solid #ffeb3b;background:#222;color:#ffeb3b}
+button.on{background:#ffeb3b;color:#000}
+#warn{font-size:14px;padding:0 12px 6px;color:#ccc}
+</style></head><body><div id="app">
+<div id="bar"><span id="stCam">카메라: 꺼짐</span><span id="stAI">AI: 대기</span><span id="stS">분할: 대기</span><span id="stD">깊이: 대기</span></div>
+<div id="stage"><video id="v" playsinline muted></video><canvas id="o"></canvas></div>
+<div id="info"><div id="list">시작 버튼을 눌러주세요</div><div id="said"></div></div>
+<div id="dinfo" style="font-size:14px;color:#ccc;padding:0 12px"></div>
+<div id="btns"><button id="bCam">카메라 시작</button><button id="bVoice" class="on">음성 켜짐</button><button id="bDepth" class="on">공간분석 켜짐</button></div>
+<div id="warn">시연용 프로토타입입니다. 실제 보행 안전을 보장하지 않으며 지팡이·안내견 등 기존 보조 수단을 대체하지 않습니다. 거리는 측정하지 않고 상대적 근접도만 안내합니다. 초록색은 통행 가능으로 'AI가 추정한' 후보 영역이고 '장애물 후보'와 함께 확정이 아니며 놓치거나 잘못 알릴 수 있습니다.</div>
+</div>
+<script>
+const $=id=>document.getElementById(id),vid=$('v'),ov=$('o'),oc=ov.getContext('2d');
+const CONF=.55,TICK_MS=180,AW=320;           // 약 5~6 FPS 분석
+const TARGET={person:'사람',bicycle:'자전거',car:'자동차',motorcycle:'오토바이',bus:'버스',truck:'트럭',chair:'의자',bench:'벤치','potted plant':'화분',dog:'강아지',cat:'고양이','traffic light':'신호등'};
+const SCALE={person:1,bicycle:1,motorcycle:1,car:1.6,bus:2.2,truck:2.2,chair:.8,bench:1.2,'potted plant':.7,dog:.5,cat:.4}; // 종류별 임계값 배율
+const BASE=[.06,.18], FAST=['car','bus','truck','motorcycle','bicycle','dog'];
+const LV=['원거리','중거리','근접'], LVW=['멀리','가까이','매우 가까이'];
+const ac=document.createElement('canvas'),ax=ac.getContext('2d',{willReadFrequently:true});let AH=240;
+let model=null,stream=null,running=false,busy=false,lastFrame=0,actx=null,timer=null;
+
+// ---------- 음성 (큐 + 우선순위) ----------
+let voiceOn=true,queue=[],speaking=false,cur=null,lastNormal=0,lastKey={};
+const ga=s=>((s.charCodeAt(s.length-1)-0xAC00)%28===0)?'가':'이';
+function beep(){if(!actx)return;for(let i=0;i<3;i++){const o=actx.createOscillator(),g=actx.createGain(),t=actx.currentTime+i*.16;o.frequency.value=1000;g.gain.value=.6;o.connect(g);g.connect(actx.destination);o.start(t);o.stop(t+.1);}}
+function pump(){if(speaking||!queue.length)return;const t=queue.shift();speaking=true;$('said').textContent='🔊 '+t;
+  const u=new SpeechSynthesisUtterance(t);u.lang='ko-KR';u.rate=1.15;cur=u;
+  const v=speechSynthesis.getVoices().find(v=>v.lang.replace('_','-')==='ko-KR');if(v)u.voice=v;
+  const done=()=>{if(cur===u){speaking=false;cur=null;pump();}};u.onend=u.onerror=done;setTimeout(done,7000); // 멈춤 방지
+  speechSynthesis.speak(u);}
+// pri: 2=긴급(전부 끊고 즉시, 쿨타임 무시) 1=근접(쿨타임 무시, 큐 앞) 0=일반(3초 쿨타임)
+function say(text,key,pri=0){if(!voiceOn)return;const now=performance.now();
+  if(pri===2){if(now-(lastKey['U'+key]||0)<1500)return;lastKey['U'+key]=now;queue=[text];speechSynthesis.cancel();speaking=false;cur=null;beep();setTimeout(pump,80);return;}
+  if(now-(lastKey[key]||0)<(pri?3000:10000)||queue.includes(text))return;
+  if(pri===0&&(now-lastNormal<3000||queue.length>=2))return;
+  lastKey[key]=now;if(pri===0)lastNormal=now;pri?queue.unshift(text):queue.push(text);queue.length=Math.min(queue.length,3);pump();}
+
+// ---------- 분석 ----------
+function iou(a,b){const w=Math.min(a.x2,b.x2)-Math.max(a.x1,b.x1),h=Math.min(a.y2,b.y2)-Math.max(a.y1,b.y1);if(w<=0||h<=0)return 0;const i=w*h;return i/((a.x2-a.x1)*(a.y2-a.y1)+(b.x2-b.x1)*(b.y2-b.y1)-i);}
+const dirOf=x=>(x<.17?'10시':x<.35?'11시':x<.65?'12시':x<.83?'1시':'2시')+' 방향';
+const lvl=(l,a)=>{const s=SCALE[l]||1;return a<BASE[0]*s?0:a<BASE[1]*s?1:2;};
+let tracks=[],nid=1;
+function lightColor(b){const vw=vid.videoWidth,vh=vid.videoHeight,w=Math.max(4,Math.round((b.x2-b.x1)*vw)),h=Math.max(4,Math.round((b.y2-b.y1)*vh));
+  const t=document.createElement('canvas');t.width=w;t.height=h;const g=t.getContext('2d');g.drawImage(vid,b.x1*vw,b.y1*vh,(b.x2-b.x1)*vw,(b.y2-b.y1)*vh,0,0,w,h);const d=g.getImageData(0,0,w,h).data;let r=0,gr=0,y=0;
+  for(let i=0;i<d.length;i+=8){const R=d[i]/255,G=d[i+1]/255,B=d[i+2]/255,mx=Math.max(R,G,B),df=mx-Math.min(R,G,B);if(mx<.6||df/mx<.5)continue;
+    let H=mx===R?60*(((G-B)/df)%6):mx===G?60*((B-R)/df+2):60*((R-G)/df+4);if(H<0)H+=360;
+    if(H<20||H>340)r++;else if(H>=25&&H<=65)y++;else if(H>=80&&H<=180)gr++;}
+  return r+gr+y<3?'':(r>=gr&&r>=y)?'빨간불':gr>=y?'초록불':'노란불';}
+// 이름을 모르는 장애물: 바닥색이 위로 어디까지 이어지는지 확인 (상대적 근접도만 사용)
+let obsCnt=0;
+function freeSpace(){const G=80,d=ax.getImageData(0,0,AW,AH).data,px=(x,y)=>{const i=(Math.floor(y/G*AH)*AW+Math.floor(x/G*AW))*4;return [d[i],d[i+1],d[i+2]];};
+  let ref=[0,0,0],n=0;for(let y=70;y<77;y++)for(let x=32;x<48;x++){const p=px(x,y);ref[0]+=p[0];ref[1]+=p[1];ref[2]+=p[2];n++;}ref=ref.map(v=>v/n);
+  let miss=0,stop=null;for(let y=77;y>=40;y--){const m=[0,0,0];for(let x=28;x<52;x++){const p=px(x,y);m[0]+=p[0];m[1]+=p[1];m[2]+=p[2];}
+    if(Math.hypot(m[0]/24-ref[0],m[1]/24-ref[1],m[2]/24-ref[2])>50){if(++miss>=2){stop=(y+1)/G;break;}}else miss=0;}return stop;}
+
+function analyze(preds,now){
+  const dets=preds.filter(p=>p.score>=CONF&&TARGET[p.class]).map(p=>({l:p.class,x1:p.bbox[0]/AW,y1:p.bbox[1]/AH,x2:(p.bbox[0]+p.bbox[2])/AW,y2:(p.bbox[1]+p.bbox[3])/AH}));
+  const used=new Set(),cur=[];
+  for(const d of dets){const a=(d.x2-d.x1)*(d.y2-d.y1);
+    let t=tracks.filter(t=>t.l===d.l&&!used.has(t)).sort((p,q)=>iou(q.b,d)-iou(p.b,d))[0];if(!t||iou(t.b,d)<.3){t={id:nid++,l:d.l,h:[]};tracks.push(t);}
+    used.add(t);t.b=d;t.seen=now;t.h.push([now,a]);while(t.h.length&&now-t.h[0][0]>1000)t.h.shift();
+    const A=t.h[0],B=t.h[t.h.length-1],r=B[0]-A[0]>=400?B[1]/Math.max(A[1],1e-4):1;
+    cur.push({t,d,a,r,lv:d.l==='traffic light'?0:lvl(d.l,a),dir:dirOf((d.x1+d.x2)/2),ctr:d.x2>.2&&d.x1<.8});}
+  tracks=tracks.filter(t=>now-t.seen<1500);   // 사라진 객체 정보 삭제
+  draw(cur);
+  for(const c of cur){const k=TARGET[c.d.l];                // 1) 긴급: 빠르게 커지는 근접 객체
+    if(c.d.l!=='traffic light'&&c.ctr&&c.lv===2&&c.r>(FAST.includes(c.d.l)?1.25:1.6)){say(`위험! ${c.dir}에서 ${k}${ga(k)} 빠르게 가까워지고 있습니다`,'t'+c.t.id,2);return;}}
+  for(const c of cur){const k=TARGET[c.d.l];                // 2) 근접 우선 안내
+    if(c.d.l!=='traffic light'&&c.lv===2&&c.ctr){say(`${c.dir} 매우 가까이에 ${k}${ga(k)} 있습니다`,`t${c.t.id}L2`,1);return;}}
+  const tl=cur.filter(c=>c.d.l==='traffic light').sort((p,q)=>q.a-p.a)[0];
+  if(tl){const col=lightColor(tl.d);if(col){say(`앞의 신호등이 ${col} 입니다`,'tl'+col,0);}}
+  if(!spaceAnnounce(cur,now)&&!spaceReady()){const stop=freeSpace();obsCnt=(stop!==null&&stop>=.7)?obsCnt+1:0;   // 3) 공간분석 모델이 없으면 바닥색 방식으로 대체
+    if(obsCnt>=3){stop>=.85?say('정면 가까이에 장애물이 있을 수 있습니다','ob2',1):say('정면에 장애물이 있을 수 있습니다','ob1',0);}}
+  for(const c of cur.filter(c=>c.d.l!=='traffic light').sort((p,q)=>q.a/(SCALE[q.d.l]||1)-p.a/(SCALE[p.d.l]||1)).slice(0,1)){  // 4) 일반 안내
+    const k=TARGET[c.d.l];say(`${c.dir} ${LVW[c.lv]}에 ${k}${ga(k)} 있습니다`,`t${c.t.id}L${c.lv}`,0);}
+}
+function draw(cur){ov.width=vid.videoWidth;ov.height=vid.videoHeight;drawSpace(performance.now());oc.lineWidth=5;oc.font='bold 30px sans-serif';let html='';
+  for(const c of cur){const col=c.lv===2?'#ff1744':c.lv===1?'#ffeb3b':'#00e676',b=c.d,k=TARGET[b.l],txt=b.l==='traffic light'?k:`${k} ${LV[c.lv]}`;
+    oc.strokeStyle=col;oc.fillStyle=col;oc.strokeRect(b.x1*ov.width,b.y1*ov.height,(b.x2-b.x1)*ov.width,(b.y2-b.y1)*ov.height);oc.fillText(txt,b.x1*ov.width+4,Math.max(32,b.y1*ov.height-8));
+    html+=`<div>${c.lv===2?'⚠ [근접] ':c.lv===1?'[중거리] ':'[원거리] '}${k} · ${c.dir}</div>`;}
+  $('dinfo').textContent=`객체 ${aMs}ms`+spaceInfo(performance.now());
+  $('list').innerHTML=html||'탐지된 대상 없음 (탐지되지 않는 장애물이 있을 수 있습니다)';}
+
+
+// ---------- 공간 분석: SegFormer-B0(ADE20K) + Depth Anything V2 Small (ONNX Runtime Web, WebGPU→WASM) ----------
+const TJS='https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.7.6';
+const SEG_ID='Xenova/segformer-b0-finetuned-ade-512-512',DEP_ID='onnx-community/depth-anything-v2-small';
+const SEG_W=256,DEP_W=196;                       // 분석용 축소 해상도
+const WALK=new Set([3,6,9,11,13,28,29,46,52,54,91,94]);     // ADE20K: floor road grass sidewalk earth rug field sand path runway dirt-track land
+const WALLISH=new Set([0,1,5,8,14,32,42,58,59,53,121]);      // wall building ceiling windowpane door fence column screen-door stairway stairs step
+const LANES=[['11시 방향',.08,.35],['12시 방향',.35,.65],['1시 방향',.65,.92]];
+let T=null,segM=null,segP=null,depE=null,RawImg=null,spaceOn=true,heavy=false,backend='wasm';
+let segRes=null,depRes=null,segMs=0,depMs=0,aMs=0,sched=null,segEvery=700,depEvery=1000,lastSeg=0,lastDep=0,cnt=[0,0,0],slow=0;
+const sc=document.createElement('canvas'),sx=sc.getContext('2d',{willReadFrequently:true}),dc=document.createElement('canvas'),dx=dc.getContext('2d',{willReadFrequently:true});
+const mc=document.createElement('canvas'),mx=mc.getContext('2d');
+const fresh=(r,now)=>r&&now-r.t<3000;                       // 3초 넘으면 '오래된 결과'로 취급(안내·표시 제외)
+async function loadSpace(){$('stS').textContent='분할: 불러오는 중';$('stD').textContent='깊이: 불러오는 중';
+  try{T=await import(TJS);RawImg=T.RawImage;
+    const gpu=!!navigator.gpu&&await navigator.gpu.requestAdapter().then(a=>!!a).catch(()=>false);
+    const mk=async dev=>{const o=dev==='webgpu'?{device:'webgpu',dtype:'fp32'}:{device:'wasm',dtype:'q8'};
+      segP=await T.AutoProcessor.from_pretrained(SEG_ID);segM=await T.AutoModelForSemanticSegmentation.from_pretrained(SEG_ID,o);
+      depE=await T.pipeline('depth-estimation',DEP_ID,dev==='webgpu'?{device:'webgpu',dtype:'fp16'}:{device:'wasm',dtype:'q8'});backend=dev;};
+    try{if(!gpu)throw 0;await mk('webgpu');}catch(e){await mk('wasm');}   // WebGPU 미지원/실패 시 WASM 대체
+    $('stS').textContent='분할: 준비됨('+backend+')';$('stD').textContent='깊이: 준비됨';
+  }catch(e){console.error(e);segM=null;depE=null;$('stS').textContent='분할: 실패';$('stD').textContent='깊이: 실패(색상 방식 사용)';}}
+const spaceReady=()=>spaceOn&&segM&&depE;
+
+// 분할 → 바닥 마스크(격자) : logits [1,150,h,w] 에서 argmax
+async function runSeg(){const H=Math.round(SEG_W*vid.videoHeight/vid.videoWidth/8)*8;sc.width=SEG_W;sc.height=H;sx.drawImage(vid,0,0,SEG_W,H);
+  segP.size={width:SEG_W,height:H};const inp=await segP(new RawImg(sx.getImageData(0,0,SEG_W,H).data,SEG_W,H,4));
+  const {logits}=await segM(inp),[,C,h,w]=logits.dims,d=logits.data,cls=new Uint8Array(h*w);
+  for(let i=0;i<h*w;i++){let b=0,bv=-1e9;for(let c=0;c<C;c++){const v=d[c*h*w+i];if(v>bv){bv=v;b=c;}}cls[i]=b;}
+  segRes={t:performance.now(),cls,w,h,lanes:LANES.map(([n,a,b])=>laneSeg(cls,w,h,a,b))};}
+function laneSeg(cls,w,h,a,b){const x0=Math.floor(a*w),x1=Math.floor(b*w);let stop=null,miss=0,top=null;
+  const frac=y=>{let f=0;for(let x=x0;x<x1;x++)if(WALK.has(cls[y*w+x]))f++;return f/(x1-x0);};
+  const bot=(frac(Math.floor(h*.9))+frac(Math.floor(h*.95)))/2;
+  for(let y=Math.floor(h*.95);y>=Math.floor(h*.45);y--){if(frac(y)<.5){if(++miss>=2){stop=(y+1)/h;break;}}else miss=0;}
+  if(stop!==null){const cnts={};const y=Math.max(0,Math.floor(stop*h)-2);for(let x=x0;x<x1;x++){const c=cls[y*w+x];cnts[c]=(cnts[c]||0)+1;}
+    top=+Object.keys(cnts).sort((p,q)=>cnts[q]-cnts[p])[0];}
+  return {bot,stop,top,extent:stop===null?1:Math.max(0,(.95-stop)/.5)};}   // extent: 앞쪽으로 바닥이 이어지는 상대 길이(0~1)
+
+// 깊이 → 구역별 깊이 불연속/수직면 (값이 클수록 가까움, 프레임 내 상대값)
+async function runDepth(){const DH=Math.max(14,Math.round(DEP_W*vid.videoHeight/vid.videoWidth/14)*14);dc.width=DEP_W;dc.height=DH;dx.drawImage(vid,0,0,DEP_W,DH);
+  depE.processor.size={width:DEP_W,height:DEP_W};const o=await depE(new RawImg(dx.getImageData(0,0,DEP_W,DH).data,DEP_W,DH,4));
+  depRes={t:performance.now(),lanes:depthLanes(o.predicted_depth)};}
+function depthLanes(t){const [h,w]=t.dims.slice(-2),d=t.data,sorted=Float32Array.from(d).sort();
+  const p5=sorted[Math.floor(sorted.length*.05)],p98=sorted[Math.floor(sorted.length*.98)],rng=Math.max(p98-p5,1e-6),nrm=v=>(v-p5)/rng;
+  const row=(y,a,b)=>{const yy=Math.min(h-1,Math.floor(y*h));let m=0,c=0;for(let x=Math.floor(a*w);x<Math.floor(b*w);x++){m+=d[yy*w+x];c++;}return m/c;};
+  return LANES.map(([name,a,b])=>{const bot=nrm((row(.88,a,b)+row(.92,a,b)+row(.95,a,b))/3);let minS=bot,run=0,cand=null;
+    for(let y=.85;y>=.45;y-=.04){const v=nrm(row(y,a,b));if(v<minS)minS=v;if(v-minS>.18){if(++run>=2){cand=v;break;}}else run=0;}
+    let kind=null,N=0;if(cand!==null){kind='step';N=cand;}
+    else{const mid=nrm((row(.55,a,b)+row(.6,a,b)+row(.65,a,b))/3);if(bot>.5&&bot-mid<.12){kind='flat';N=bot;}}
+    return {kind,N};});}
+
+// 순차 스케줄러: 한 번에 하나만 실행, 지연되면 주기를 늘림(발열/렉 대응)
+function adapt(ms,base){return Math.min(6000,Math.max(base,ms*1.6));}
+async function spaceTick(){if(!running||!spaceReady())return;const now=performance.now();
+  if(!heavy&&vid.readyState>=2&&vid.videoWidth){const dueS=now-lastSeg-segEvery,dueD=now-lastDep-depEvery;
+    if(dueS>=0||dueD>=0){heavy=true;try{
+      if(dueS>=dueD){const t0=performance.now();await runSeg();segMs=Math.round(performance.now()-t0);lastSeg=performance.now();segEvery=adapt(segMs,700);}
+      else{const t0=performance.now();await runDepth();depMs=Math.round(performance.now()-t0);lastDep=performance.now();depEvery=adapt(depMs,1000);}
+      slow=Math.max(segMs,depMs)>4000?slow+1:0;if(slow>=3){spaceOn=false;$('bDepth').textContent='공간분석 꺼짐(느림)';$('bDepth').classList.remove('on');}
+    }catch(e){console.error(e);}heavy=false;}}
+  sched=setTimeout(spaceTick,120);}
+function startSpace(){clearTimeout(sched);if(!spaceOn)return;(segM?Promise.resolve():loadSpace()).then(()=>{lastSeg=lastDep=performance.now()-5000;spaceTick();});}
+
+// ---------- 통합 판단: 분할(공간) + 깊이(상대 근접) + 객체 이름 ----------
+function spaceAnnounce(cur,now){
+  if(!spaceReady()||!(fresh(segRes,now)||fresh(depRes,now)))return false;
+  const out=[];
+  LANES.forEach(([nm,a,b],i)=>{const S=fresh(segRes,now)?segRes.lanes[i]:null,D=fresh(depRes,now)?depRes.lanes[i]:null;
+    const segSig=S&&S.stop!==null&&S.extent<.5,depSig=D&&D.kind&&D.N>=.5;
+    if(!segSig&&!depSig){cnt[i]=0;return;}
+    cnt[i]++;const both=segSig&&depSig;if(cnt[i]<(both?2:3))return;           // 신호가 하나뿐이면 더 오래 확인(불확실 → 판단 보류)
+    if(cur.some(c=>c.d.l!=='traffic light'&&c.d.x2>a&&c.d.x1<b&&c.d.y2>.45))return;   // 이름을 아는 객체는 객체 안내 사용
+    const near=(D&&D.N>=.75)||(S&&S.extent<.25);
+    let what='종류를 알 수 없는 장애물 후보';if(S&&S.top!==null){if(WALLISH.has(S.top))what='벽이나 문으로 추정되는 면';else if(!WALK.has(S.top)&&S.top!==2&&S.top!==12)what='가구나 물체로 추정되는 장애물 후보';}
+    out.push({i,nm,near,what,both});});
+  out.sort((p,q)=>(q.near-p.near)||(q.both-p.both));
+  for(const o of out.slice(0,1)){say(`${o.nm} ${o.near?'매우 가까이':'가까이'}에 ${o.what}이 있습니다`.replace('후보이','후보가').replace('면이','면이'),'sp'+o.i+o.what+o.near,(o.i===1&&o.near)?1:0);}
+  return true;}
+function drawSpace(now){const W=ov.width,H=ov.height;
+  if(fresh(segRes,now)){const {cls,w,h}=segRes;mc.width=w;mc.height=h;const im=mx.createImageData(w,h);
+    for(let i=0;i<w*h;i++)if(WALK.has(cls[i])){im.data[4*i+1]=230;im.data[4*i+2]=118;im.data[4*i+3]=90;}
+    mx.putImageData(im,0,0);oc.imageSmoothingEnabled=true;oc.drawImage(mc,0,0,W,H);}      // 초록: 통행 가능 '추정' 후보
+  LANES.forEach(([nm,a,b],i)=>{if(cnt[i]>=2){oc.fillStyle='rgba(255,23,68,.28)';oc.fillRect(a*W,H*.5,(b-a)*W,H*.5);oc.fillStyle='#ff1744';oc.font='bold 26px sans-serif';oc.fillText('후보',a*W+8,H*.5+30);}});}   // 빨강: 장애물 후보 구역
+function spaceInfo(now){const age=r=>r?((now-r.t)/1000).toFixed(1)+'초 전'+((now-r.t)>3000?'(오래됨)':''):'없음';
+  return ` · 분할 ${segMs}ms(${age(segRes)}) · 깊이 ${depMs}ms(${age(depRes)})`;}
+$('bDepth').onclick=()=>{spaceOn=!spaceOn;slow=0;$('bDepth').textContent=spaceOn?'공간분석 켜짐':'공간분석 꺼짐';$('bDepth').classList.toggle('on',spaceOn);
+  clearTimeout(sched);if(!spaceOn){segRes=depRes=null;cnt=[0,0,0];}else if(running)startSpace();};
+
+// ---------- 실행 루프 ----------
+async function tick(){if(!running)return;
+  if(!busy&&!heavy&&model&&vid.readyState>=2&&vid.videoWidth){busy=true;heavy=true;try{AH=Math.round(AW*vid.videoHeight/vid.videoWidth);ac.width=AW;ac.height=AH;ax.drawImage(vid,0,0,AW,AH);
+      const t0=performance.now(),p=await model.detect(ac,12);lastFrame=performance.now();aMs=Math.round(lastFrame-t0);analyze(p,lastFrame);}catch(e){console.error(e);}busy=false;heavy=false;}
+  timer=setTimeout(tick,TICK_MS);}
+function loadJS(src){return new Promise((ok,no)=>{const s=document.createElement('script');s.src=src;s.onload=ok;s.onerror=()=>no(new Error('로딩 실패'));document.head.appendChild(s);});}
+async function loadModel(){if(model)return;$('stAI').textContent='AI: 불러오는 중';
+  try{await loadJS('https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.17.0/dist/tf.min.js');await loadJS('https://cdn.jsdelivr.net/npm/@tensorflow-models/coco-ssd@2.2.3/dist/coco-ssd.min.js');
+    model=await cocoSsd.load({base:'lite_mobilenet_v2'});$('stAI').textContent='AI: 준비됨';}
+  catch(e){$('stAI').textContent='AI: 로딩 실패 (재시도: 시작 버튼)';}}
+async function startCam(){
+  if(!isSecureContext){$('list').textContent='HTTPS 주소에서만 카메라를 사용할 수 있습니다';return;}
+  actx=actx||new (window.AudioContext||window.webkitAudioContext)();
+  try{stream=await navigator.mediaDevices.getUserMedia({video:{facingMode:{ideal:'environment'},width:{ideal:640}},audio:false});}
+  catch(e){$('stCam').textContent='카메라: 오류';$('list').textContent=e.name==='NotAllowedError'?'카메라 권한이 거부되었습니다. 설정에서 허용해 주세요':'카메라를 연결할 수 없습니다';return;}
+  vid.srcObject=stream;stream.getVideoTracks()[0].onended=()=>{stopCam();$('list').textContent='영상이 중단되었습니다. 다시 시작해 주세요';};
+  await vid.play();try{await navigator.wakeLock.request('screen');}catch(e){}
+  running=true;lastFrame=performance.now();$('stCam').textContent='카메라: 켜짐';$('bCam').textContent='카메라 정지';$('bCam').classList.add('on');
+  say('안내를 시작합니다','start',1);await loadModel();tick();startSpace();}
+function stopCam(){running=false;clearTimeout(timer);clearTimeout(sched);segRes=depRes=null;cnt=[0,0,0];if(stream)stream.getTracks().forEach(t=>t.stop());stream=null;vid.srcObject=null;oc.clearRect(0,0,ov.width,ov.height);
+  speechSynthesis.cancel();queue=[];speaking=false;tracks=[];$('stCam').textContent='카메라: 꺼짐';$('bCam').textContent='카메라 시작';$('bCam').classList.remove('on');}
+$('bCam').onclick=()=>running?stopCam():startCam();
+$('bVoice').onclick=()=>{voiceOn=!voiceOn;$('bVoice').textContent=voiceOn?'음성 켜짐':'음성 꺼짐';$('bVoice').classList.toggle('on',voiceOn);if(!voiceOn){speechSynthesis.cancel();queue=[];speaking=false;}};
+setInterval(()=>{if(running&&model&&performance.now()-lastFrame>5000){$('list').textContent='영상 중단 감지: 카메라를 다시 시작합니다';stopCam();startCam();lastFrame=performance.now();}},2000);
+document.addEventListener('visibilitychange',()=>{if(document.hidden&&running)stopCam();});
+loadModel();
+</script></body></html>
