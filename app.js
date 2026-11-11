@@ -1,5 +1,5 @@
-// SpaceAudio v0.2 — Depth Anything V2 Small + SegFormer-B0(ADE20K) 실제 추론. 접근물체/신호등은 미구현.
-import { pipeline, RawImage } from 'https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.7.2';
+// SpaceAudio v0.2.1 — Depth Anything V2 Small + SegFormer-B0(ADE20K) 실제 추론. 접근물체/신호등은 미구현.
+let pipeline, RawImage;   // CDN 로드 실패 시에도 버튼이 동작하도록 지연 로드
 const $ = id => document.getElementById(id);
 const v = $('v'), st = $('status'), go = $('go'), octx = $('o').getContext('2d');
 const W = 256, H = 192, C = 12, R = 12;
@@ -131,6 +131,8 @@ function draw() {
 // ---------- 모델 / 카메라 / 루프 ----------
 const prog = n => p => { if (p.status === 'progress') st.textContent = `${n} 다운로드 ${p.progress | 0}%`; };
 async function loadModels() {
+  st.textContent = '라이브러리 로딩 중…';
+  ({ pipeline, RawImage } = await import('https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.7.2'));
   const id = 'onnx-community/depth-anything-v2-small';
   if (navigator.gpu) { try { depther = await pipeline('depth-estimation', id, { device: 'webgpu', progress_callback: prog('깊이모델') }); } catch (e) { console.warn(e); } }
   depther ??= await pipeline('depth-estimation', id, { device: 'wasm', dtype: 'q8', progress_callback: prog('깊이모델') });
@@ -185,7 +187,7 @@ $('flip').onclick = async () => { if (fileMode) return; facing = facing === 'env
 $('file').onchange = e => { const f = e.target.files[0]; if (!f) return; fileMode = true; stream?.getTracks().forEach(t => t.stop());
   v.srcObject = null; v.src = URL.createObjectURL(f); v.loop = true; v.muted = true; st.textContent = '영상 파일 선택됨. "보조 시작"을 누르세요'; };
 $('log').onclick = () => { const a = document.createElement('a');
-  a.href = URL.createObjectURL(new Blob(['t,ms,fps,conf,src,' + Array.from({ length: C }, (_, i) => 'c' + i) + '\n' + logs.map(r => r.join(',')).join('\n') + '\n\nquiz_ok,quiz_n\n' + quiz.ok + ',' + quiz.n], { type: 'text/csv' })));
+  a.href = URL.createObjectURL(new Blob(['t,ms,fps,conf,src,' + Array.from({ length: C }, (_, i) => 'c' + i) + '\n' + logs.map(r => r.join(',')).join('\n') + '\n\nquiz_ok,quiz_n\n' + quiz.ok + ',' + quiz.n], { type: 'text/csv' }));
   a.download = 'spaceaudio-log.csv'; a.click(); };
 // ---------- 3D 소리 테스트 & 방향 인식 퀴즈(방향 인식률 측정) ----------
 $('test').onclick = async () => {
@@ -203,4 +205,4 @@ const qd = $('quiz');
 function next() { quiz.cur = [9, 10, 11, 12, 1, 2, 3][Math.random() * 7 | 0];
   const p = () => spatialBeep(h2az(quiz.cur), 0, 900, 0.5); setTimeout(p, 700); setTimeout(p, 950); }
 $('qz').onclick = async () => { if (!ac) initAudio(); await ac.resume(); qd.style.display = 'grid'; quiz.n = quiz.ok = 0; st.textContent = '어느 시 방향에서 들리나요? (이어폰 착용)'; next(); };
-if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});
+if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js?v=2').catch(() => {});
