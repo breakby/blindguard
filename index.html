@@ -18,6 +18,7 @@ button,.btn{display:block;box-sizing:border-box;text-align:center;width:100%;min
 <details><summary>설정 · 테스트</summary>
 <button id="test">3D 소리 테스트 (시계 방향 순회)</button>
 <button id="qz">방향 인식 퀴즈</button><div id="quiz"></div>
+<label style="display:block;min-height:44px"><input type="checkbox" id="cont" checked> 연속음 모드 (해당 방향에서 은은히 울리고 가까울수록 커짐)</label>
 <label style="display:block;min-height:44px"><input type="checkbox" id="seg"> 분할 모델 사용 (메모리 큼, 불안정하면 끄세요)</label>
 <label style="display:block;min-height:44px"><input type="checkbox" id="wasm"> WebGPU 사용 (빠르지만 메모리↑, 실험용)</label>
 <label style="display:block;min-height:44px">평면 민감도 <input type="range" id="ft" min="0.02" max="0.6" step="0.01" value="0.18"></label>
@@ -34,7 +35,7 @@ window.addEventListener('unhandledrejection',function(e){var s=document.getEleme
 // SpaceAudio v0.2.1 — Depth Anything V2 Small + SegFormer-B0(ADE20K) 실제 추론. 접근물체/신호등은 미구현.
 let pipeline, RawImage;   // CDN 로드 실패 시에도 버튼이 동작하도록 지연 로드
 const $ = id => document.getElementById(id);
-const VERSION = 'v0.2.9';
+const VERSION = 'v0.3.0';
 const store = { get: k => { try { return localStorage.getItem(k); } catch (e) { return null; } }, set: (k, v) => { try { localStorage.setItem(k, v); } catch (e) {} } };
 let crashes = +(store.get('crashes') || 0), prevCrash = null;   // 이전 실행이 정상 종료되지 않았으면 '충돌'로 보고 점점 가볍게 시작
 if (store.get('running') === '1') { crashes++; store.set('crashes', crashes); prevCrash = store.get('last') || '기록 없음'; store.set('running', '0'); }
@@ -71,7 +72,7 @@ function initAudio() {
   ac = new (window.AudioContext || window.webkitAudioContext)();
   noise = ac.createBuffer(1, ac.sampleRate * 0.15, ac.sampleRate);
   const d = noise.getChannelData(0); for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1;
-  setInterval(tick, 40);
+  contInit(); setInterval(tick, 40);
 }
 function spatialBeep(az, el, freq, gain, kind = 'noise', r = 1.5) {   // r: 음원까지의 가상 거리(m 아님, 공간감용)   // 광대역 노이즈 버스트가 순음보다 방향 정위가 좋음
   const t = ac.currentTime, g = ac.createGain();
@@ -87,16 +88,46 @@ function spatialBeep(az, el, freq, gain, kind = 'noise', r = 1.5) {   // r: 음�
   g.connect(p); p.connect(ac.destination); s.start(t); s.stop(t + 0.15);
 }
 let audioErr = '';
+// ---------- 연속음 모드: 위험 방향마다 끊기지 않는 소리 1개(최대 3개). 가까울수록 커지고 음이 높아짐 ----------
+const CONT = () => $('cont').checked, slots = [];
+function contInit() {
+  for (let i = 0; i < 3; i++) {
+    const o = ac.createOscillator(), g = ac.createGain(), p = ac.createPanner();
+    p.panningModel = 'HRTF'; p.distanceModel = 'inverse'; p.refDistance = 1;
+    o.type = 'sine'; o.frequency.value = 600; g.gain.value = 0;
+    o.connect(g); g.connect(p); p.connect(ac.destination); o.start();
+    slots.push({ o, g, p, id: -1, cur: null });
+  }
+}
+function setPos(p, x, y, z, t) {
+  if (p.positionX) { p.positionX.setTargetAtTime(x, t, 0.06); p.positionY.setTargetAtTime(y, t, 0.06); p.positionZ.setTargetAtTime(z, t, 0.06); }
+  else p.setPosition(x, y, z);
+}
+function contUpdate() {
+  const t = ac.currentTime, free = [];
+  slots.forEach(s => { s.cur = voices.find(o => o.id === s.id) || null; if (!s.cur) free.push(s); });   // 같은 방향은 같은 슬롯 유지(소리가 튀지 않게)
+  voices.filter(o => !slots.some(s => s.cur === o)).forEach(o => { const s = free.shift(); if (s) { s.cur = o; s.id = o.id; } });
+  slots.forEach(s => {
+    const o = s.cur;
+    if (!o) { s.g.gain.setTargetAtTime(0, t, 0.15); return; }
+    s.g.gain.setTargetAtTime(0.03 + 0.55 * o.sev * o.sev, t, 0.08);              // 위험↑ → 커짐 (먼 곳은 아주 은은하게)
+    s.o.frequency.setTargetAtTime(FREQ[o.band] * (1 + 0.5 * o.sev), t, 0.08);   // 음량만 믿지 않도록 음높이도 상승
+    const ty = o.sev > 0.8 ? 'square' : 'sine'; if (s.o.type !== ty) s.o.type = ty;
+    setPos(s.p, Math.sin(o.az), [-0.4, 0, 0.4][o.band], -Math.cos(o.az), t);
+  });
+}
+function contStop() { if (!ac) return; const t = ac.currentTime; slots.forEach(s => s.g.gain.setTargetAtTime(0, t, 0.05)); }
 function tick() { try { tick0(); } catch (e) { audioErr = e.message; } }
 function tick0() {
   if (!running) return; if (ac.state !== 'running') ac.resume().catch(() => {});   // iOS가 오디오를 중단시키면 자동 복구 시도 const n = performance.now();
-  for (const o of voices) {           // 위험도↑ → 반복 간격↓ (음량으로 거리 표현 X)
+  if (CONT()) contUpdate();
+  else for (const o of voices) {           // 위험도↑ → 반복 간격↓ (음량으로 거리 표현 X)
     if (n < (nextAt[o.id] || 0)) continue;
     spatialBeep(o.az, [-0.6, 0, 0.6][o.band], FREQ[o.band] * (1 + 0.5 * o.sev), 0.3 + 0.3 * o.sev, o.sev > 0.8 ? 'square' : 'noise', 3 - 2.4 * o.sev);  // 위험↑ → 가까운 위치·높은 음·짧은 간격
     nextAt[o.id] = n + 1000 - 850 * o.sev;
   }
   if (n > (nextAt.hb || 0)) { spatialBeep(0, 0, 440, 0.3, 'sine'); nextAt.hb = n + 4000; }   // 작동 중 신호음
-  if (beacon != null && n > (nextAt.bc || 0)) { spatialBeep(beacon, 0, 660, 0.1, 'sine'); nextAt.bc = n + 1400; }
+  if (!CONT() && beacon != null && n > (nextAt.bc || 0)) { spatialBeep(beacon, 0, 660, 0.1, 'sine'); nextAt.bc = n + 1400; }
 }
 // ---------- 분석 ----------
 function fit(pts) {
@@ -176,7 +207,7 @@ function update() {
   peaks.sort((a, b) => colS[b] - colS[a]);
   const chosen = []; for (const c of peaks) if (chosen.every(k => Math.abs(k - c) >= 2) && chosen.length < 3) chosen.push(c);
   voices = chosen.map(c => ({ id: c, az: colAz(c), sev: colS[c], band: rb[c] }));
-  const u = chosen.find(c => urg[c] >= 2); if (u != null) say(clock(colAz(u)) + ' 장애물, 멈추세요', 'u', 3000);
+  const u = chosen.find(c => urg[c] >= 2); if (u != null) say('멈추세요', 'u', 3000);   // 방향은 소리가 알려줌
   // 비콘: 중앙 경로가 막혔을 때 가장 열린 방향을 부드러운 사인음으로 안내
   beacon = null;
   if (Math.max(...colS.slice(4, 8)) > 0.3) {
@@ -245,7 +276,7 @@ async function loop() {
     await new Promise(r => setTimeout(r, Math.max(0, 150 - (performance.now() - t0))));   // 최대 ~6fps로 제한(발열·메모리 압박 완화)
   }
 }
-function stop() { running = false; store.set('running', '0'); stream?.getTracks().forEach(t => t.stop()); voices = []; beacon = null; v.pause();
+function stop() { running = false; store.set('running', '0'); stream?.getTracks().forEach(t => t.stop()); voices = []; beacon = null; contStop(); v.pause();
   go.textContent = '보조 시작'; go.classList.remove('on'); st.textContent = '정지됨'; say('보조 기능을 정지합니다', 's', 0); }
 go.onclick = async () => {
   if (running) return stop();
