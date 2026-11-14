@@ -1,211 +1,297 @@
-<!doctype html><html lang="ko"><head><meta charset="utf-8">
+<!doctype html>
+<html lang="ko"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
-<meta name="apple-mobile-web-app-capable" content="yes"><title>AI 보행 보조 (시연용)</title>
+<link rel="manifest" href="manifest.json"><meta name="apple-mobile-web-app-capable" content="yes">
+<title>SpaceAudio 보행 보조 (실험용)</title>
 <style>
-html,body{margin:0;height:100%;background:#000;color:#ffeb3b;font-family:-apple-system,"Noto Sans KR",sans-serif}
-#app{display:flex;flex-direction:column;height:100dvh;padding:env(safe-area-inset-top) 0 env(safe-area-inset-bottom)}
-#bar{display:flex;gap:8px;padding:8px 12px;font-size:13px;font-weight:700}
-#bar span{flex:1;padding:6px;border:2px solid #ffeb3b;border-radius:8px;text-align:center}
-#stage{position:relative;flex:1;min-height:0;background:#111}
-#v,#o{position:absolute;inset:0;width:100%;height:100%;object-fit:contain}
-#info{padding:8px 12px;font-size:22px;line-height:1.35;min-height:92px}
-#said{color:#fff;font-size:20px;margin-top:4px}
-#btns{display:flex;gap:10px;padding:8px 12px 12px}
-button{flex:1;height:72px;font-size:17px;font-weight:800;border-radius:16px;border:3px solid #ffeb3b;background:#222;color:#ffeb3b}
-button.on{background:#ffeb3b;color:#000}
-#warn{font-size:14px;padding:0 12px 6px;color:#ccc}
-</style></head><body><div id="app">
-<div id="bar"><span id="stCam">카메라: 꺼짐</span><span id="stAI">AI: 대기</span><span id="stS">분할: 대기</span><span id="stD">깊이: 대기</span></div>
-<div id="stage"><video id="v" playsinline muted></video><canvas id="o"></canvas></div>
-<div id="info"><div id="list">시작 버튼을 눌러주세요</div><div id="said"></div></div>
-<div id="dinfo" style="font-size:14px;color:#ccc;padding:0 12px"></div>
-<div id="btns"><button id="bCam">카메라 시작</button><button id="bVoice" class="on">음성 켜짐</button><button id="bDepth" class="on">공간분석 켜짐</button></div>
-<div id="warn">시연용 프로토타입입니다. 실제 보행 안전을 보장하지 않으며 지팡이·안내견 등 기존 보조 수단을 대체하지 않습니다. 거리는 측정하지 않고 상대적 근접도만 안내합니다. 초록색은 통행 가능으로 'AI가 추정한' 후보 영역이고 '장애물 후보'와 함께 확정이 아니며 놓치거나 잘못 알릴 수 있습니다.</div>
-</div>
-<script>
-const $=id=>document.getElementById(id),vid=$('v'),ov=$('o'),oc=ov.getContext('2d');
-const CONF=.55,TICK_MS=180,AW=320;           // 약 5~6 FPS 분석
-const TARGET={person:'사람',bicycle:'자전거',car:'자동차',motorcycle:'오토바이',bus:'버스',truck:'트럭',chair:'의자',bench:'벤치','potted plant':'화분',dog:'강아지',cat:'고양이','traffic light':'신호등'};
-const SCALE={person:1,bicycle:1,motorcycle:1,car:1.6,bus:2.2,truck:2.2,chair:.8,bench:1.2,'potted plant':.7,dog:.5,cat:.4}; // 종류별 임계값 배율
-const BASE=[.06,.18], FAST=['car','bus','truck','motorcycle','bicycle','dog'];
-const LV=['원거리','중거리','근접'], LVW=['멀리','가까이','매우 가까이'];
-const ac=document.createElement('canvas'),ax=ac.getContext('2d',{willReadFrequently:true});let AH=240;
-let model=null,stream=null,running=false,busy=false,lastFrame=0,actx=null,timer=null;
+body{margin:0;background:#111;color:#fff;font:18px system-ui,sans-serif;padding:env(safe-area-inset-top) 12px env(safe-area-inset-bottom)}
+#stage{position:relative;margin:8px 0}video,canvas{width:100%;display:block;border-radius:8px;background:#222}
+canvas{position:absolute;inset:0;background:none}
+button,.btn{display:block;box-sizing:border-box;text-align:center;width:100%;min-height:60px;font-size:20px;font-weight:700;border:0;border-radius:12px;margin:6px 0;background:#444;color:#fff;line-height:60px}
+#go{background:#2d7ff9;font-size:24px;min-height:72px}#go.on{background:#d33}
+#quiz{display:none;grid-template-columns:repeat(4,1fr);gap:6px}#quiz button{min-height:56px;margin:0;line-height:1}
+#status{min-height:3em;font-size:15px}.warn{font-size:13px;color:#fb4}details{margin:8px 0}summary{min-height:44px;line-height:44px}
+</style></head><body><main>
+<div id="stage"><video id="v" playsinline muted></video><canvas id="o" width="256" height="192"></canvas></div>
+<p id="status" role="status" aria-live="polite">대기 중</p>
+<button id="go" aria-label="보조 기능 시작">보조 시작</button>
+<details><summary>설정 · 테스트</summary>
+<button id="test">3D 소리 테스트 (시계 방향 순회)</button>
+<button id="qz">방향 인식 퀴즈</button><div id="quiz"></div>
+<label style="display:block;min-height:44px"><input type="checkbox" id="seg"> 분할 모델 사용 (메모리 큼, 불안정하면 끄세요)</label>
+<label style="display:block;min-height:44px"><input type="checkbox" id="wasm"> WebGPU 사용 (빠르지만 메모리↑, 실험용)</label>
+<label style="display:block;min-height:44px">평면 민감도 <input type="range" id="ft" min="0.02" max="0.6" step="0.01" value="0.18"></label>
+<button id="rc">충돌 기록 초기화</button>
+<button id="flip">카메라 전환</button>
+<label class="btn">녹화 영상으로 테스트<input id="file" type="file" accept="video/*" hidden></label>
+<button id="log">로그 CSV 저장</button></details>
+<p class="warn">실험용 프로토타입입니다. 백색지팡이·안내견을 대체하지 않으며 안전이 검증되지 않았습니다. 이어폰(개방형/골전도 권장)을 사용하세요.</p>
+</main><script>
+window.addEventListener('error',function(e){var s=document.getElementById('status');if(s)s.textContent='스크립트 오류: '+e.message+' ('+(e.lineno||'?')+')';});
+window.addEventListener('unhandledrejection',function(e){var s=document.getElementById('status');if(s)s.textContent='오류: '+(e.reason&&e.reason.message||e.reason);});
+</script>
+<script type="module">
+// SpaceAudio v0.2.1 — Depth Anything V2 Small + SegFormer-B0(ADE20K) 실제 추론. 접근물체/신호등은 미구현.
+let pipeline, RawImage;   // CDN 로드 실패 시에도 버튼이 동작하도록 지연 로드
+const $ = id => document.getElementById(id);
+const VERSION = 'v0.2.8';
+const store = { get: k => { try { return localStorage.getItem(k); } catch (e) { return null; } }, set: (k, v) => { try { localStorage.setItem(k, v); } catch (e) {} } };
+let crashes = +(store.get('crashes') || 0), prevCrash = null;   // 이전 실행이 정상 종료되지 않았으면 '충돌'로 보고 점점 가볍게 시작
+if (store.get('running') === '1') { crashes++; store.set('crashes', crashes); prevCrash = store.get('last') || '기록 없음'; store.set('running', '0'); }
+const [DW, DH] = crashes >= 1 ? [126, 98] : [168, 126]; let engine = '?';   // 깊이 모델 입력(14의 배수)
+const v = $('v'), st = $('status'), go = $('go'), octx = $('o').getContext('2d');
+const W = 256, H = 192, C = 12, R = 12;
+const HFOV = 60 * Math.PI / 180, SPREAD = 1.6;   // 가정값: 카메라 수평 시야 60°, 음향 무대 1.6배 확장
+const cv = document.createElement('canvas'); cv.width = W; cv.height = H;
+const cx = cv.getContext('2d', { willReadFrequently: true });
+let ac, noise, depther, seg, stream, running = false, facing = 'environment', beta = null, fileMode = false;
+let blocked = false, cvFlat = 1, frame = 0, segBusy = false, segFloor = null, fitA = 0.05, fitB = 0, conf = 0, voices = [], beacon = null;
+const colS = new Float32Array(C), urg = new Uint8Array(C), cellSev = new Float32Array(C * R);
+const nextAt = {}, speakAt = {}, logs = [], quiz = { n: 0, ok: 0, cur: null };
+const clamp = (x, a = 0, b = 1) => Math.max(a, Math.min(b, x));
+const colAz = c => ((c + 0.5) / C - 0.5) * HFOV * SPREAD;               // 라디안, +우측
+const clock = az => { let h = Math.round(az * 180 / Math.PI / 30); return ((h + 12) % 12 || 12) + '시 방향'; };
+const h2az = h => (h > 6 ? h - 12 : h) * 30 * Math.PI / 180;
+const FREQ = [900, 550, 330];                                           // 하부/중부/상부 음색
 
-// ---------- 음성 (큐 + 우선순위) ----------
-let voiceOn=true,queue=[],speaking=false,cur=null,lastNormal=0,lastKey={};
-const ga=s=>((s.charCodeAt(s.length-1)-0xAC00)%28===0)?'가':'이';
-function beep(){if(!actx)return;for(let i=0;i<3;i++){const o=actx.createOscillator(),g=actx.createGain(),t=actx.currentTime+i*.16;o.frequency.value=1000;g.gain.value=.6;o.connect(g);g.connect(actx.destination);o.start(t);o.stop(t+.1);}}
-function pump(){if(speaking||!queue.length)return;const t=queue.shift();speaking=true;$('said').textContent='🔊 '+t;
-  const u=new SpeechSynthesisUtterance(t);u.lang='ko-KR';u.rate=1.15;cur=u;
-  const v=speechSynthesis.getVoices().find(v=>v.lang.replace('_','-')==='ko-KR');if(v)u.voice=v;
-  const done=()=>{if(cur===u){speaking=false;cur=null;pump();}};u.onend=u.onerror=done;setTimeout(done,7000); // 멈춤 방지
-  speechSynthesis.speak(u);}
-// pri: 2=긴급(전부 끊고 즉시, 쿨타임 무시) 1=근접(쿨타임 무시, 큐 앞) 0=일반(3초 쿨타임)
-function say(text,key,pri=0){if(!voiceOn)return;const now=performance.now();
-  if(pri===2){if(now-(lastKey['U'+key]||0)<1500)return;lastKey['U'+key]=now;queue=[text];speechSynthesis.cancel();speaking=false;cur=null;beep();setTimeout(pump,80);return;}
-  if(now-(lastKey[key]||0)<(pri?3000:10000)||queue.includes(text))return;
-  if(pri===0&&(now-lastNormal<3000||queue.length>=2))return;
-  lastKey[key]=now;if(pri===0)lastNormal=now;pri?queue.unshift(text):queue.push(text);queue.length=Math.min(queue.length,3);pump();}
-
-// ---------- 분석 ----------
-function iou(a,b){const w=Math.min(a.x2,b.x2)-Math.max(a.x1,b.x1),h=Math.min(a.y2,b.y2)-Math.max(a.y1,b.y1);if(w<=0||h<=0)return 0;const i=w*h;return i/((a.x2-a.x1)*(a.y2-a.y1)+(b.x2-b.x1)*(b.y2-b.y1)-i);}
-const dirOf=x=>(x<.17?'10시':x<.35?'11시':x<.65?'12시':x<.83?'1시':'2시')+' 방향';
-const lvl=(l,a)=>{const s=SCALE[l]||1;return a<BASE[0]*s?0:a<BASE[1]*s?1:2;};
-let tracks=[],nid=1;
-function lightColor(b){const vw=vid.videoWidth,vh=vid.videoHeight,w=Math.max(4,Math.round((b.x2-b.x1)*vw)),h=Math.max(4,Math.round((b.y2-b.y1)*vh));
-  const t=document.createElement('canvas');t.width=w;t.height=h;const g=t.getContext('2d');g.drawImage(vid,b.x1*vw,b.y1*vh,(b.x2-b.x1)*vw,(b.y2-b.y1)*vh,0,0,w,h);const d=g.getImageData(0,0,w,h).data;let r=0,gr=0,y=0;
-  for(let i=0;i<d.length;i+=8){const R=d[i]/255,G=d[i+1]/255,B=d[i+2]/255,mx=Math.max(R,G,B),df=mx-Math.min(R,G,B);if(mx<.6||df/mx<.5)continue;
-    let H=mx===R?60*(((G-B)/df)%6):mx===G?60*((B-R)/df+2):60*((R-G)/df+4);if(H<0)H+=360;
-    if(H<20||H>340)r++;else if(H>=25&&H<=65)y++;else if(H>=80&&H<=180)gr++;}
-  return r+gr+y<3?'':(r>=gr&&r>=y)?'빨간불':gr>=y?'초록불':'노란불';}
-// 이름을 모르는 장애물: 바닥색이 위로 어디까지 이어지는지 확인 (상대적 근접도만 사용)
-let obsCnt=0;
-function freeSpace(){const G=80,d=ax.getImageData(0,0,AW,AH).data,px=(x,y)=>{const i=(Math.floor(y/G*AH)*AW+Math.floor(x/G*AW))*4;return [d[i],d[i+1],d[i+2]];};
-  let ref=[0,0,0],n=0;for(let y=70;y<77;y++)for(let x=32;x<48;x++){const p=px(x,y);ref[0]+=p[0];ref[1]+=p[1];ref[2]+=p[2];n++;}ref=ref.map(v=>v/n);
-  let miss=0,stop=null;for(let y=77;y>=40;y--){const m=[0,0,0];for(let x=28;x<52;x++){const p=px(x,y);m[0]+=p[0];m[1]+=p[1];m[2]+=p[2];}
-    if(Math.hypot(m[0]/24-ref[0],m[1]/24-ref[1],m[2]/24-ref[2])>50){if(++miss>=2){stop=(y+1)/G;break;}}else miss=0;}return stop;}
-
-function analyze(preds,now){
-  const dets=preds.filter(p=>p.score>=CONF&&TARGET[p.class]).map(p=>({l:p.class,x1:p.bbox[0]/AW,y1:p.bbox[1]/AH,x2:(p.bbox[0]+p.bbox[2])/AW,y2:(p.bbox[1]+p.bbox[3])/AH}));
-  const used=new Set(),cur=[];
-  for(const d of dets){const a=(d.x2-d.x1)*(d.y2-d.y1);
-    let t=tracks.filter(t=>t.l===d.l&&!used.has(t)).sort((p,q)=>iou(q.b,d)-iou(p.b,d))[0];if(!t||iou(t.b,d)<.3){t={id:nid++,l:d.l,h:[]};tracks.push(t);}
-    used.add(t);t.b=d;t.seen=now;t.h.push([now,a]);while(t.h.length&&now-t.h[0][0]>1000)t.h.shift();
-    const A=t.h[0],B=t.h[t.h.length-1],r=B[0]-A[0]>=400?B[1]/Math.max(A[1],1e-4):1;
-    cur.push({t,d,a,r,lv:d.l==='traffic light'?0:lvl(d.l,a),dir:dirOf((d.x1+d.x2)/2),ctr:d.x2>.2&&d.x1<.8});}
-  tracks=tracks.filter(t=>now-t.seen<1500);   // 사라진 객체 정보 삭제
-  draw(cur);
-  for(const c of cur){const k=TARGET[c.d.l];                // 1) 긴급: 빠르게 커지는 근접 객체
-    if(c.d.l!=='traffic light'&&c.ctr&&c.lv===2&&c.r>(FAST.includes(c.d.l)?1.25:1.6)){say(`위험! ${c.dir}에서 ${k}${ga(k)} 빠르게 가까워지고 있습니다`,'t'+c.t.id,2);return;}}
-  for(const c of cur){const k=TARGET[c.d.l];                // 2) 근접 우선 안내
-    if(c.d.l!=='traffic light'&&c.lv===2&&c.ctr){say(`${c.dir} 매우 가까이에 ${k}${ga(k)} 있습니다`,`t${c.t.id}L2`,1);return;}}
-  const tl=cur.filter(c=>c.d.l==='traffic light').sort((p,q)=>q.a-p.a)[0];
-  if(tl){const col=lightColor(tl.d);if(col){say(`앞의 신호등이 ${col} 입니다`,'tl'+col,0);}}
-  if(!spaceAnnounce(cur,now)&&!spaceReady()){const stop=freeSpace();obsCnt=(stop!==null&&stop>=.7)?obsCnt+1:0;   // 3) 공간분석 모델이 없으면 바닥색 방식으로 대체
-    if(obsCnt>=3){stop>=.85?say('정면 가까이에 장애물이 있을 수 있습니다','ob2',1):say('정면에 장애물이 있을 수 있습니다','ob1',0);}}
-  for(const c of cur.filter(c=>c.d.l!=='traffic light').sort((p,q)=>q.a/(SCALE[q.d.l]||1)-p.a/(SCALE[p.d.l]||1)).slice(0,1)){  // 4) 일반 안내
-    const k=TARGET[c.d.l];say(`${c.dir} ${LVW[c.lv]}에 ${k}${ga(k)} 있습니다`,`t${c.t.id}L${c.lv}`,0);}
+function say(t, k, cd) {
+  const n = performance.now(); if (speakAt[k] && n - speakAt[k] < cd) return; speakAt[k] = n;
+  speechSynthesis.cancel(); const u = new SpeechSynthesisUtterance(t); u.lang = 'ko-KR'; speechSynthesis.speak(u);
 }
-function draw(cur){ov.width=vid.videoWidth;ov.height=vid.videoHeight;drawSpace(performance.now());oc.lineWidth=5;oc.font='bold 30px sans-serif';let html='';
-  for(const c of cur){const col=c.lv===2?'#ff1744':c.lv===1?'#ffeb3b':'#00e676',b=c.d,k=TARGET[b.l],txt=b.l==='traffic light'?k:`${k} ${LV[c.lv]}`;
-    oc.strokeStyle=col;oc.fillStyle=col;oc.strokeRect(b.x1*ov.width,b.y1*ov.height,(b.x2-b.x1)*ov.width,(b.y2-b.y1)*ov.height);oc.fillText(txt,b.x1*ov.width+4,Math.max(32,b.y1*ov.height-8));
-    html+=`<div>${c.lv===2?'⚠ [근접] ':c.lv===1?'[중거리] ':'[원거리] '}${k} · ${c.dir}</div>`;}
-  $('dinfo').textContent=`객체 ${aMs}ms`+spaceInfo(performance.now());
-  $('list').innerHTML=html||'탐지된 대상 없음 (탐지되지 않는 장애물이 있을 수 있습니다)';}
+// ---------- 3D 공간 음향: 연속 방위각(HRTF) + 높이(y) ----------
+function silentWav() {   // 무음 파일을 <audio>로 재생 → iOS가 '미디어 재생'으로 취급해 무음 스위치 영향이 줄어듦
+  const n = 8000, b = new ArrayBuffer(44 + n * 2), d = new DataView(b), w = (o, s) => { for (let i = 0; i < s.length; i++) d.setUint8(o + i, s.charCodeAt(i)); };
+  w(0, 'RIFF'); d.setUint32(4, 36 + n * 2, true); w(8, 'WAVEfmt '); d.setUint32(16, 16, true); d.setUint16(20, 1, true); d.setUint16(22, 1, true);
+  d.setUint32(24, 8000, true); d.setUint32(28, 16000, true); d.setUint16(32, 2, true); d.setUint16(34, 16, true); w(36, 'data'); d.setUint32(40, n * 2, true);
+  return URL.createObjectURL(new Blob([b], { type: 'audio/wav' }));
+}
+function initAudio() {
+  try { navigator.audioSession.type = 'playback'; } catch (e) {}          // Safari 16.4+: 무음 스위치와 무관하게 재생
+  try { const a = new Audio(silentWav()); a.loop = true; a.play().catch(() => {}); } catch (e) {}
+  ac = new (window.AudioContext || window.webkitAudioContext)();
+  noise = ac.createBuffer(1, ac.sampleRate * 0.15, ac.sampleRate);
+  const d = noise.getChannelData(0); for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1;
+  setInterval(tick, 40);
+}
+function spatialBeep(az, el, freq, gain, kind = 'noise', r = 1.5) {   // r: 음원까지의 가상 거리(m 아님, 공간감용)   // 광대역 노이즈 버스트가 순음보다 방향 정위가 좋음
+  const t = ac.currentTime, g = ac.createGain();
+  const p = ac.createPanner(); p.panningModel = 'HRTF'; p.distanceModel = 'inverse'; p.refDistance = 1;
+  const px = r * Math.sin(az), pz = -r * Math.cos(az);
+  if (p.positionX) { p.positionX.value = px; p.positionY.value = el; p.positionZ.value = pz; } else p.setPosition(px, el, pz);
+  let s;
+  if (kind === 'noise') { s = ac.createBufferSource(); s.buffer = noise; const f = ac.createBiquadFilter();
+    f.type = 'bandpass'; f.frequency.value = freq; f.Q.value = 1.5; s.connect(f); f.connect(g); gain *= 6; }
+  else { s = ac.createOscillator(); s.type = kind; s.frequency.value = freq; s.connect(g); }
+  g.gain.setValueAtTime(0, t); g.gain.linearRampToValueAtTime(clamp(gain), t + 0.008);
+  g.gain.exponentialRampToValueAtTime(0.001, t + 0.12);
+  g.connect(p); p.connect(ac.destination); s.start(t); s.stop(t + 0.15);
+}
+let audioErr = '';
+function tick() { try { tick0(); } catch (e) { audioErr = e.message; } }
+function tick0() {
+  if (!running) return; if (ac.state !== 'running') ac.resume().catch(() => {});   // iOS가 오디오를 중단시키면 자동 복구 시도 const n = performance.now();
+  for (const o of voices) {           // 위험도↑ → 반복 간격↓ (음량으로 거리 표현 X)
+    if (n < (nextAt[o.id] || 0)) continue;
+    spatialBeep(o.az, [-0.6, 0, 0.6][o.band], FREQ[o.band] * (1 + 0.5 * o.sev), 0.3 + 0.3 * o.sev, o.sev > 0.8 ? 'square' : 'noise', 3 - 2.4 * o.sev);  // 위험↑ → 가까운 위치·높은 음·짧은 간격
+    nextAt[o.id] = n + 1000 - 850 * o.sev;
+  }
+  if (n > (nextAt.hb || 0)) { spatialBeep(0, 0, 440, 0.3, 'sine'); nextAt.hb = n + 4000; }   // 작동 중 신호음
+  if (beacon != null && n > (nextAt.bc || 0)) { spatialBeep(beacon, 0, 660, 0.1, 'sine'); nextAt.bc = n + 1400; }
+}
+// ---------- 분석 ----------
+function fit(pts) {
+  const total = pts.length; let a = 0, b = 0;
+  for (let it = 0; it < 3 && pts.length >= 8; it++) {
+    const n = pts.length, mx = pts.reduce((s, p) => s + p[0], 0) / n, my = pts.reduce((s, p) => s + p[1], 0) / n;
+    let sxy = 0, sxx = 0; pts.forEach(p => { sxy += (p[0] - mx) * (p[1] - my); sxx += (p[0] - mx) ** 2; });
+    a = sxy / (sxx + 1e-9); b = my - a * mx;
+    const res = pts.map(p => p[1] - (a * p[0] + b)), sd = Math.sqrt(res.reduce((s, x) => s + x * x, 0) / n) + 1e-6;
+    pts = pts.filter((p, i) => Math.abs(res[i]) < 1.5 * sd);
+  }
+  return { a, b, inlier: total ? pts.length / total : 0 };
+}
+const FT = () => +$('ft').value;   // 평면도 임계값(슬라이더). 작을수록 '평평한 화면'으로 판정되는 경우가 줄어듦
+function flatness(t) {   // 원본(정규화 전) 깊이의 변동계수. 벽/문처럼 한 평면이면 작고, 바닥·복도처럼 깊이 변화가 크면 큼
+  if (!t?.data) return 1;
+  const dm = t.dims, h = dm[dm.length - 2], w = dm[dm.length - 1], s = new Float32Array(C * R);
+  for (let r = 0; r < R; r++) for (let c = 0; c < C; c++) {
+    let a = 0, n = 0;
+    for (let y = (r * h / R) | 0; y < ((r + 1) * h / R | 0); y += 2) for (let x = (c * w / C) | 0; x < ((c + 1) * w / C | 0); x += 2) { a += t.data[y * w + x]; n++; }
+    s[r * C + c] = n ? a / n : 0;
+  }
+  const m = s.reduce((x, y) => x + y, 0) / s.length, sd = Math.sqrt(s.reduce((x, y) => x + (y - m) ** 2, 0) / s.length);
+  return sd / (Math.abs(m) + 1e-6);
+}
+function analyze(d, rawT) {
+  const w = d.width, h = d.height, g = new Float32Array(C * R);
+  for (let r = 0; r < R; r++) for (let c = 0; c < C; c++) {
+    let s = 0, n = 0;
+    for (let y = (r * h / R) | 0; y < ((r + 1) * h / R | 0); y++) for (let x = (c * w / C) | 0; x < ((c + 1) * w / C | 0); x++) { s += d.data[y * w + x]; n++; }
+    g[r * C + c] = s / n / 255;
+  }
+  const so = Float32Array.from(g).sort(), lo = so[(C * R * 0.05) | 0], hi = so[(C * R * 0.95) | 0];
+  for (let i = 0; i < g.length; i++) g[i] = (g[i] - lo) / (hi - lo + 1e-6);
+  // 바닥 모델: SegFormer가 '바닥'이라 한 셀로 적합(없으면 하단 중앙 폴백)
+  let pts = [], src = 'depth';
+  if (segFloor) { for (let r = 5; r < R; r++) for (let c = 0; c < C; c++) if (segFloor[r * C + c] > 0.6) pts.push([r, g[r * C + c]]); if (pts.length >= 10) src = 'seg+depth'; }
+  if (src === 'depth') { pts = []; for (let r = 7; r < R; r++) for (let c = 3; c < 9; c++) pts.push([r, g[r * C + c]]); }
+  const f = fit(pts), ok = f.a > 0.01;
+  if (ok) { fitA = 0.7 * fitA + 0.3 * f.a; fitB = 0.7 * fitB + 0.3 * f.b; }        // 시간적 평활
+  const pitchOK = beta == null || Math.abs(beta - 90) < 35;
+  conf = (ok ? f.inlier : 0) * (pitchOK ? 1 : 0.5) * (src === 'seg+depth' ? 1 : 0.8);
+  const dRef = fitA * 9 + fitB; let fl = 0, conflict = 0;
+  for (let r = 0; r < R; r++) for (let c = 0; c < C; c++) {
+    const i = r * C + c, val = g[i];
+    let s = r >= 8 ? clamp((val - (fitA * r + fitB) - 0.12) / 0.25) : clamp((val - dRef - 0.1) / 0.25);
+    if (segFloor && r >= 8) {
+      const sf = segFloor[i];
+      if (sf > 0.7) { fl++; if (s > 0.6) conflict++; s *= 0.6; }                  // 센서 불일치는 불확실성↑
+      else if (sf < 0.2 && s > 0.2) s = clamp(s * 1.3);                          // 비바닥 + 깊이 근접 → 강화
+    }
+    cellSev[i] = s;
+  }
+  if (fl > 8) conf *= 1 - 0.8 * (conflict / fl);
+  // 정면 막힘 의심: 화면이 한 평면(벽/문)이거나 바닥 기울기를 확인할 수 없을 때, 폰이 대체로 수평이면 보수적으로 경고
+  cvFlat = flatness(rawT);
+  blocked = pitchOK && (cvFlat < FT() || !ok);
+  if (blocked) for (let r = 2; r < R; r++) for (let c = 2; c < C - 2; c++) cellSev[r * C + c] = Math.max(cellSev[r * C + c], 0.75);
+  return src;
+}
+function update() {
+  const raw = new Float32Array(C), rb = new Uint8Array(C);
+  for (let c = 0; c < C; c++) {
+    let best = -1;
+    for (let b = 0; b < 3; b++) {   // 0 하부, 1 중부, 2 상부
+      const rows = b === 0 ? [8, 12] : b === 1 ? [4, 8] : [0, 4], v2 = [];
+      for (let r = rows[0]; r < rows[1]; r++) v2.push(cellSev[r * C + c]);
+      v2.sort((x, y) => y - x); const m = (v2[0] + v2[1]) / 2;
+      if (m > best) { best = m; rb[c] = b; }
+    }
+    raw[c] = best;
+    colS[c] = raw[c] > colS[c] ? 0.7 * raw[c] + 0.3 * colS[c] : 0.4 * raw[c] + 0.6 * colS[c]; // 빠른 상승
+    urg[c] = colS[c] > 0.85 ? urg[c] + 1 : 0;
+  }
+  const peaks = [];   // 지역 최대 열에서 최대 3개 음원
+  for (let c = 0; c < C; c++) if (colS[c] > 0.25 && colS[c] >= (colS[c - 1] ?? 0) && colS[c] >= (colS[c + 1] ?? 0)) peaks.push(c);
+  peaks.sort((a, b) => colS[b] - colS[a]);
+  const chosen = []; for (const c of peaks) if (chosen.every(k => Math.abs(k - c) >= 2) && chosen.length < 3) chosen.push(c);
+  voices = chosen.map(c => ({ id: c, az: colAz(c), sev: colS[c], band: rb[c] }));
+  const u = chosen.find(c => urg[c] >= 2); if (u != null) say(clock(colAz(u)) + ' 장애물, 멈추세요', 'u', 3000);
+  // 비콘: 중앙 경로가 막혔을 때 가장 열린 방향을 부드러운 사인음으로 안내
+  beacon = null;
+  if (Math.max(...colS.slice(4, 8)) > 0.3) {
+    let bc = -1, bs = 9;
+    for (let c = 1; c < C - 1; c++) { const s = (colS[c - 1] + colS[c] + colS[c + 1]) / 3 + Math.abs(c - 5.5) * 0.01; if (s < bs) { bs = s; bc = c; } }
+    if (bs < 0.25) beacon = colAz(bc);
+  }
+  if (blocked) say('정면에 벽이나 문이 가까울 수 있습니다', 'blk', 4000);
+  else if (conf < 0.45) say('판단이 불확실합니다. 카메라를 천천히 움직여 주세요', 'unc', 6000);
+}
+function draw() {
+  octx.clearRect(0, 0, W, H); const cw = W / C, ch = H / R;
+  for (let r = 0; r < R; r++) for (let c = 0; c < C; c++) {
+    const s = cellSev[r * C + c];
+    octx.fillStyle = conf < 0.45 ? 'rgba(255,200,0,.25)' : `rgba(${255 * s | 0},${255 * (1 - s) | 0},60,.35)`;
+    octx.fillRect(c * cw, r * ch, cw - 1, ch - 1);
+  }
+}
+// ---------- 모델 / 카메라 / 루프 ----------
+const prog = n => p => { if (p.status === 'progress') st.textContent = `${n} 다운로드 ${p.progress | 0}%`; };
+async function loadModels() {
+  st.textContent = '라이브러리 로딩 중…'; store.set('last', 'load-lib');
+  ({ pipeline, RawImage } = await import('https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.7.2'));
+  store.set('last', 'load-depth'); const id = 'onnx-community/depth-anything-v2-small', wasm = crashes >= 1 || !$('wasm').checked;   // 기본: WASM(q8, 메모리 적음)
+  if (navigator.gpu && !wasm) { try { depther = await pipeline('depth-estimation', id, { device: 'webgpu', progress_callback: prog('깊이모델') }); engine = 'webgpu'; } catch (e) { console.warn(e); } }
+  if (!depther) { depther = await pipeline('depth-estimation', id, { device: 'wasm', dtype: 'q8', progress_callback: prog('깊이모델') }); engine = 'wasm'; }
+  store.set('last', 'depth-ready ' + engine); try { depther.processor.image_processor.size = { width: DW, height: DH }; } catch (e) { console.warn('입력 축소 실패', e); }  // 기본 518px 입력은 iPhone 메모리에 과함
+  if ($('seg').checked && crashes < 2) {
+    try { seg = await pipeline('image-segmentation', 'Xenova/segformer-b0-finetuned-ade-512-512', { device: 'wasm', dtype: 'q8', progress_callback: prog('분할모델') });
+      try { seg.processor.image_processor.size = { width: 256, height: 192 }; } catch (e) {} }
+    catch (e) { console.warn('SegFormer 로드 실패', e); seg = null; }
+  }
+}
+function runSeg() {
+  segBusy = true;
+  seg(RawImage.fromCanvas(cv)).then(res => {
+    const f = new Float32Array(C * R);
+    for (const m of res) { if (!/^(floor|road|sidewalk|rug|path)/.test(m.label)) continue; const k = m.mask;
+      for (let r = 0; r < R; r++) for (let c = 0; c < C; c++) for (let j = 0; j < 9; j++) {
+        const x = ((c + (j % 3 + 0.5) / 3) * k.width / C) | 0, y = ((r + (((j / 3) | 0) + 0.5) / 3) * k.height / R) | 0;
+        if (k.data[y * k.width + x] > 127) f[r * C + c] += 1 / 9;
+      } }
+    segFloor = f;
+  }).catch(console.warn).finally(() => { segBusy = false; });
+}
+async function startCam() {
+  store.set('last', 'camera');
+  stream?.getTracks().forEach(t => t.stop());
+  stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: facing, width: { ideal: 480 } }, audio: false });
+  v.srcObject = stream; await v.play();
+}
+async function loop() {
+  let last = performance.now();
+  while (running) {
+    const t0 = performance.now(); frame++;
+    cx.drawImage(v, 0, 0, W, H);
+    if (seg && !segBusy && frame % 4 === 1) runSeg();
+    const out = await depther(RawImage.fromCanvas(cv));
+    const src = analyze(out.depth, out.predicted_depth); update(); draw();
+    try { out.predicted_depth?.dispose?.(); } catch (e) {}                 // 텐서 메모리 즉시 반환
+    const dt = performance.now() - t0, fps = 1000 / (performance.now() - last); last = performance.now();
+    if (logs.length > 3000) logs.shift();
+    if (frame % 10 === 0) store.set('last', `frame ${frame} ${engine} seg:${!!seg}`);   // 충돌 직전 기록
+    logs.push([Date.now(), dt | 0, fps.toFixed(1), conf.toFixed(2), src, ...Array.from(colS, x => x.toFixed(2))]);
+    st.textContent = `🔊${ac?.state}${audioErr ? ' ⚠' + audioErr : ''} · 추론 ${dt | 0}ms · ${fps.toFixed(1)}fps · 신뢰도 ${conf * 100 | 0}% · ${engine}/${DW}px · 평면도 ${cvFlat.toFixed(2)}${blocked ? ' ⚠막힘의심' : ''} · ${src}${seg ? '' : '(분할 없음)'}${beacon != null ? ' · 열린 길 ' + clock(beacon) : ''}`;
+    await new Promise(r => setTimeout(r, Math.max(0, 150 - (performance.now() - t0))));   // 최대 ~6fps로 제한(발열·메모리 압박 완화)
+  }
+}
+function stop() { running = false; store.set('running', '0'); stream?.getTracks().forEach(t => t.stop()); voices = []; beacon = null; v.pause();
+  go.textContent = '보조 시작'; go.classList.remove('on'); st.textContent = '정지됨'; say('보조 기능을 정지합니다', 's', 0); }
+go.onclick = async () => {
+  if (running) return stop();
+  try {
+    if (!ac) initAudio(); await ac.resume();
+    store.set('running', '1'); store.set('last', 'start');   // 로딩 중 충돌도 감지
+    if (typeof DeviceOrientationEvent?.requestPermission === 'function') await DeviceOrientationEvent.requestPermission();
+    addEventListener('deviceorientation', e => { beta = e.beta; });
+    if (!depther) { st.textContent = '모델을 불러오는 중…'; say('모델을 불러옵니다', 'l', 0); await loadModels(); }
+    fileMode ? await v.play() : await startCam();
+    await ac.resume().catch(() => {});   // 카메라 시작 후 오디오가 멈추는 경우 대비
+    running = true; store.set('running', '1'); go.textContent = '보조 정지'; go.classList.add('on'); say('보조 기능을 시작합니다', 's', 0);
+    spatialBeep(-1.0, 0, 700, 0.6); setTimeout(() => spatialBeep(1.0, 0, 700, 0.6), 350);   // 시작 확인음: 왼쪽 → 오른쪽
+    loop();
+  } catch (e) { store.set('running', '0'); st.textContent = '오류: ' + e.message; console.error(e); say('시작하지 못했습니다', 'e', 0); }
+};
+$('flip').onclick = async () => { if (fileMode) return; facing = facing === 'environment' ? 'user' : 'environment'; if (running) await startCam(); };
+$('file').onchange = e => { const f = e.target.files[0]; if (!f) return; fileMode = true; stream?.getTracks().forEach(t => t.stop());
+  v.srcObject = null; v.src = URL.createObjectURL(f); v.loop = true; v.muted = true; st.textContent = '영상 파일 선택됨. "보조 시작"을 누르세요'; };
+$('log').onclick = () => { const a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob(['t,ms,fps,conf,src,' + Array.from({ length: C }, (_, i) => 'c' + i) + '\n' + logs.map(r => r.join(',')).join('\n') + '\n\nquiz_ok,quiz_n\n' + quiz.ok + ',' + quiz.n], { type: 'text/csv' }));
+  a.download = 'spaceaudio-log.csv'; a.click(); };
+// ---------- 3D 소리 테스트 & 방향 인식 퀴즈(방향 인식률 측정) ----------
+$('test').onclick = async () => {
+  if (!ac) initAudio(); await ac.resume();
+  { const o = ac.createOscillator(), g = ac.createGain(); g.gain.value = 0.3; o.frequency.value = 440; o.connect(g); g.connect(ac.destination); o.start(); o.stop(ac.currentTime + 0.4); }  // 공간화 없는 기본 삑
+  st.textContent = '오디오 상태: ' + ac.state + ' (처음 삑 소리가 들리면 출력은 정상)';
+  [3, 9, 2, 10, 12, 1, 11].forEach((h, i) => setTimeout(() => {
+    spatialBeep(h2az(h), 0, 900, 0.5); setTimeout(() => spatialBeep(h2az(h), 0, 900, 0.5), 250);
+    st.textContent = h + '시 방향'; setTimeout(() => { const u = new SpeechSynthesisUtterance(h + '시'); u.lang = 'ko-KR'; speechSynthesis.speak(u); }, 600);
+  }, 700 + i * 1800));
+};
+const qd = $('quiz');
+[9, 10, 11, 12, 1, 2, 3].forEach(h => { const b = document.createElement('button'); b.textContent = h + '시';
+  b.onclick = () => { if (quiz.cur == null) return; quiz.n++; if (h === quiz.cur) quiz.ok++;
+    st.textContent = `${h === quiz.cur ? '정답' : '오답, 정답 ' + quiz.cur + '시'} · 방향 인식률 ${quiz.ok}/${quiz.n} (${(100 * quiz.ok / quiz.n) | 0}%)`; next(); };
+  qd.appendChild(b); });
+function next() { quiz.cur = [9, 10, 11, 12, 1, 2, 3][Math.random() * 7 | 0];
+  const p = () => spatialBeep(h2az(quiz.cur), 0, 900, 0.5); setTimeout(p, 700); setTimeout(p, 950); }
+$('qz').onclick = async () => { if (!ac) initAudio(); await ac.resume(); qd.style.display = 'grid'; quiz.n = quiz.ok = 0; st.textContent = '어느 시 방향에서 들리나요? (이어폰 착용)'; next(); };
+// 디버깅 동안 서비스워커/캐시 제거(옛 파일이 남아 증상이 반복되는 것을 방지)
+if ('serviceWorker' in navigator) navigator.serviceWorker.getRegistrations().then(rs => rs.forEach(r => r.unregister())).catch(() => {});
+if (self.caches) caches.keys().then(ks => ks.forEach(k => caches.delete(k))).catch(() => {});
+st.textContent = '준비됨 (' + VERSION + ') — 보조 시작을 누르세요' + (prevCrash ? ` ⚠ 이전 실행이 비정상 종료됨(${prevCrash}). 안전 설정(WASM·초소형 입력)으로 시작합니다.` : '');
+addEventListener('pagehide', () => store.set('running', '0'));
+document.addEventListener('visibilitychange', () => { if (!document.hidden && ac) ac.resume().catch(() => {}); });
+$('rc').onclick = () => { store.set('crashes', '0'); store.set('running', '0'); location.reload(); };
 
-
-// ---------- 공간 분석: SegFormer-B0(ADE20K) + Depth Anything V2 Small (ONNX Runtime Web, WebGPU→WASM) ----------
-const TJS='https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.7.6';
-const SEG_ID='Xenova/segformer-b0-finetuned-ade-512-512',DEP_ID='onnx-community/depth-anything-v2-small';
-const SEG_W=256,DEP_W=196;                       // 분석용 축소 해상도
-const WALK=new Set([3,6,9,11,13,28,29,46,52,54,91,94]);     // ADE20K: floor road grass sidewalk earth rug field sand path runway dirt-track land
-const WALLISH=new Set([0,1,5,8,14,32,42,58,59,53,121]);      // wall building ceiling windowpane door fence column screen-door stairway stairs step
-const LANES=[['11시 방향',.08,.35],['12시 방향',.35,.65],['1시 방향',.65,.92]];
-let T=null,segM=null,segP=null,depE=null,RawImg=null,spaceOn=true,heavy=false,backend='wasm';
-let segRes=null,depRes=null,segMs=0,depMs=0,aMs=0,sched=null,segEvery=700,depEvery=1000,lastSeg=0,lastDep=0,cnt=[0,0,0],slow=0;
-const sc=document.createElement('canvas'),sx=sc.getContext('2d',{willReadFrequently:true}),dc=document.createElement('canvas'),dx=dc.getContext('2d',{willReadFrequently:true});
-const mc=document.createElement('canvas'),mx=mc.getContext('2d');
-const fresh=(r,now)=>r&&now-r.t<3000;                       // 3초 넘으면 '오래된 결과'로 취급(안내·표시 제외)
-async function loadSpace(){$('stS').textContent='분할: 불러오는 중';$('stD').textContent='깊이: 불러오는 중';
-  try{T=await import(TJS);RawImg=T.RawImage;
-    const gpu=!!navigator.gpu&&await navigator.gpu.requestAdapter().then(a=>!!a).catch(()=>false);
-    const mk=async dev=>{const o=dev==='webgpu'?{device:'webgpu',dtype:'fp32'}:{device:'wasm',dtype:'q8'};
-      segP=await T.AutoProcessor.from_pretrained(SEG_ID);segM=await T.AutoModelForSemanticSegmentation.from_pretrained(SEG_ID,o);
-      depE=await T.pipeline('depth-estimation',DEP_ID,dev==='webgpu'?{device:'webgpu',dtype:'fp16'}:{device:'wasm',dtype:'q8'});backend=dev;};
-    try{if(!gpu)throw 0;await mk('webgpu');}catch(e){await mk('wasm');}   // WebGPU 미지원/실패 시 WASM 대체
-    $('stS').textContent='분할: 준비됨('+backend+')';$('stD').textContent='깊이: 준비됨';
-  }catch(e){console.error(e);segM=null;depE=null;$('stS').textContent='분할: 실패';$('stD').textContent='깊이: 실패(색상 방식 사용)';}}
-const spaceReady=()=>spaceOn&&segM&&depE;
-
-// 분할 → 바닥 마스크(격자) : logits [1,150,h,w] 에서 argmax
-async function runSeg(){const H=Math.round(SEG_W*vid.videoHeight/vid.videoWidth/8)*8;sc.width=SEG_W;sc.height=H;sx.drawImage(vid,0,0,SEG_W,H);
-  segP.size={width:SEG_W,height:H};const inp=await segP(new RawImg(sx.getImageData(0,0,SEG_W,H).data,SEG_W,H,4));
-  const {logits}=await segM(inp),[,C,h,w]=logits.dims,d=logits.data,cls=new Uint8Array(h*w);
-  for(let i=0;i<h*w;i++){let b=0,bv=-1e9;for(let c=0;c<C;c++){const v=d[c*h*w+i];if(v>bv){bv=v;b=c;}}cls[i]=b;}
-  segRes={t:performance.now(),cls,w,h,lanes:LANES.map(([n,a,b])=>laneSeg(cls,w,h,a,b))};}
-function laneSeg(cls,w,h,a,b){const x0=Math.floor(a*w),x1=Math.floor(b*w);let stop=null,miss=0,top=null;
-  const frac=y=>{let f=0;for(let x=x0;x<x1;x++)if(WALK.has(cls[y*w+x]))f++;return f/(x1-x0);};
-  const bot=(frac(Math.floor(h*.9))+frac(Math.floor(h*.95)))/2;
-  for(let y=Math.floor(h*.95);y>=Math.floor(h*.45);y--){if(frac(y)<.5){if(++miss>=2){stop=(y+1)/h;break;}}else miss=0;}
-  if(stop!==null){const cnts={};const y=Math.max(0,Math.floor(stop*h)-2);for(let x=x0;x<x1;x++){const c=cls[y*w+x];cnts[c]=(cnts[c]||0)+1;}
-    top=+Object.keys(cnts).sort((p,q)=>cnts[q]-cnts[p])[0];}
-  return {bot,stop,top,extent:stop===null?1:Math.max(0,(.95-stop)/.5)};}   // extent: 앞쪽으로 바닥이 이어지는 상대 길이(0~1)
-
-// 깊이 → 구역별 깊이 불연속/수직면 (값이 클수록 가까움, 프레임 내 상대값)
-async function runDepth(){const DH=Math.max(14,Math.round(DEP_W*vid.videoHeight/vid.videoWidth/14)*14);dc.width=DEP_W;dc.height=DH;dx.drawImage(vid,0,0,DEP_W,DH);
-  depE.processor.size={width:DEP_W,height:DEP_W};const o=await depE(new RawImg(dx.getImageData(0,0,DEP_W,DH).data,DEP_W,DH,4));
-  depRes={t:performance.now(),lanes:depthLanes(o.predicted_depth)};}
-function depthLanes(t){const [h,w]=t.dims.slice(-2),d=t.data,sorted=Float32Array.from(d).sort();
-  const p5=sorted[Math.floor(sorted.length*.05)],p98=sorted[Math.floor(sorted.length*.98)],rng=Math.max(p98-p5,1e-6),nrm=v=>(v-p5)/rng;
-  const row=(y,a,b)=>{const yy=Math.min(h-1,Math.floor(y*h));let m=0,c=0;for(let x=Math.floor(a*w);x<Math.floor(b*w);x++){m+=d[yy*w+x];c++;}return m/c;};
-  return LANES.map(([name,a,b])=>{const bot=nrm((row(.88,a,b)+row(.92,a,b)+row(.95,a,b))/3);let minS=bot,run=0,cand=null;
-    for(let y=.85;y>=.45;y-=.04){const v=nrm(row(y,a,b));if(v<minS)minS=v;if(v-minS>.18){if(++run>=2){cand=v;break;}}else run=0;}
-    let kind=null,N=0;if(cand!==null){kind='step';N=cand;}
-    else{const mid=nrm((row(.55,a,b)+row(.6,a,b)+row(.65,a,b))/3);if(bot>.5&&bot-mid<.12){kind='flat';N=bot;}}
-    return {kind,N};});}
-
-// 순차 스케줄러: 한 번에 하나만 실행, 지연되면 주기를 늘림(발열/렉 대응)
-function adapt(ms,base){return Math.min(6000,Math.max(base,ms*1.6));}
-async function spaceTick(){if(!running||!spaceReady())return;const now=performance.now();
-  if(!heavy&&vid.readyState>=2&&vid.videoWidth){const dueS=now-lastSeg-segEvery,dueD=now-lastDep-depEvery;
-    if(dueS>=0||dueD>=0){heavy=true;try{
-      if(dueS>=dueD){const t0=performance.now();await runSeg();segMs=Math.round(performance.now()-t0);lastSeg=performance.now();segEvery=adapt(segMs,700);}
-      else{const t0=performance.now();await runDepth();depMs=Math.round(performance.now()-t0);lastDep=performance.now();depEvery=adapt(depMs,1000);}
-      slow=Math.max(segMs,depMs)>4000?slow+1:0;if(slow>=3){spaceOn=false;$('bDepth').textContent='공간분석 꺼짐(느림)';$('bDepth').classList.remove('on');}
-    }catch(e){console.error(e);}heavy=false;}}
-  sched=setTimeout(spaceTick,120);}
-function startSpace(){clearTimeout(sched);if(!spaceOn)return;(segM?Promise.resolve():loadSpace()).then(()=>{lastSeg=lastDep=performance.now()-5000;spaceTick();});}
-
-// ---------- 통합 판단: 분할(공간) + 깊이(상대 근접) + 객체 이름 ----------
-function spaceAnnounce(cur,now){
-  if(!spaceReady()||!(fresh(segRes,now)||fresh(depRes,now)))return false;
-  const out=[];
-  LANES.forEach(([nm,a,b],i)=>{const S=fresh(segRes,now)?segRes.lanes[i]:null,D=fresh(depRes,now)?depRes.lanes[i]:null;
-    const segSig=S&&S.stop!==null&&S.extent<.5,depSig=D&&D.kind&&D.N>=.5;
-    if(!segSig&&!depSig){cnt[i]=0;return;}
-    cnt[i]++;const both=segSig&&depSig;if(cnt[i]<(both?2:3))return;           // 신호가 하나뿐이면 더 오래 확인(불확실 → 판단 보류)
-    if(cur.some(c=>c.d.l!=='traffic light'&&c.d.x2>a&&c.d.x1<b&&c.d.y2>.45))return;   // 이름을 아는 객체는 객체 안내 사용
-    const near=(D&&D.N>=.75)||(S&&S.extent<.25);
-    let what='종류를 알 수 없는 장애물 후보';if(S&&S.top!==null){if(WALLISH.has(S.top))what='벽이나 문으로 추정되는 면';else if(!WALK.has(S.top)&&S.top!==2&&S.top!==12)what='가구나 물체로 추정되는 장애물 후보';}
-    out.push({i,nm,near,what,both});});
-  out.sort((p,q)=>(q.near-p.near)||(q.both-p.both));
-  for(const o of out.slice(0,1)){say(`${o.nm} ${o.near?'매우 가까이':'가까이'}에 ${o.what}이 있습니다`.replace('후보이','후보가').replace('면이','면이'),'sp'+o.i+o.what+o.near,(o.i===1&&o.near)?1:0);}
-  return true;}
-function drawSpace(now){const W=ov.width,H=ov.height;
-  if(fresh(segRes,now)){const {cls,w,h}=segRes;mc.width=w;mc.height=h;const im=mx.createImageData(w,h);
-    for(let i=0;i<w*h;i++)if(WALK.has(cls[i])){im.data[4*i+1]=230;im.data[4*i+2]=118;im.data[4*i+3]=90;}
-    mx.putImageData(im,0,0);oc.imageSmoothingEnabled=true;oc.drawImage(mc,0,0,W,H);}      // 초록: 통행 가능 '추정' 후보
-  LANES.forEach(([nm,a,b],i)=>{if(cnt[i]>=2){oc.fillStyle='rgba(255,23,68,.28)';oc.fillRect(a*W,H*.5,(b-a)*W,H*.5);oc.fillStyle='#ff1744';oc.font='bold 26px sans-serif';oc.fillText('후보',a*W+8,H*.5+30);}});}   // 빨강: 장애물 후보 구역
-function spaceInfo(now){const age=r=>r?((now-r.t)/1000).toFixed(1)+'초 전'+((now-r.t)>3000?'(오래됨)':''):'없음';
-  return ` · 분할 ${segMs}ms(${age(segRes)}) · 깊이 ${depMs}ms(${age(depRes)})`;}
-$('bDepth').onclick=()=>{spaceOn=!spaceOn;slow=0;$('bDepth').textContent=spaceOn?'공간분석 켜짐':'공간분석 꺼짐';$('bDepth').classList.toggle('on',spaceOn);
-  clearTimeout(sched);if(!spaceOn){segRes=depRes=null;cnt=[0,0,0];}else if(running)startSpace();};
-
-// ---------- 실행 루프 ----------
-async function tick(){if(!running)return;
-  if(!busy&&!heavy&&model&&vid.readyState>=2&&vid.videoWidth){busy=true;heavy=true;try{AH=Math.round(AW*vid.videoHeight/vid.videoWidth);ac.width=AW;ac.height=AH;ax.drawImage(vid,0,0,AW,AH);
-      const t0=performance.now(),p=await model.detect(ac,12);lastFrame=performance.now();aMs=Math.round(lastFrame-t0);analyze(p,lastFrame);}catch(e){console.error(e);}busy=false;heavy=false;}
-  timer=setTimeout(tick,TICK_MS);}
-function loadJS(src){return new Promise((ok,no)=>{const s=document.createElement('script');s.src=src;s.onload=ok;s.onerror=()=>no(new Error('로딩 실패'));document.head.appendChild(s);});}
-async function loadModel(){if(model)return;$('stAI').textContent='AI: 불러오는 중';
-  try{await loadJS('https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.17.0/dist/tf.min.js');await loadJS('https://cdn.jsdelivr.net/npm/@tensorflow-models/coco-ssd@2.2.3/dist/coco-ssd.min.js');
-    model=await cocoSsd.load({base:'lite_mobilenet_v2'});$('stAI').textContent='AI: 준비됨';}
-  catch(e){$('stAI').textContent='AI: 로딩 실패 (재시도: 시작 버튼)';}}
-async function startCam(){
-  if(!isSecureContext){$('list').textContent='HTTPS 주소에서만 카메라를 사용할 수 있습니다';return;}
-  actx=actx||new (window.AudioContext||window.webkitAudioContext)();
-  try{stream=await navigator.mediaDevices.getUserMedia({video:{facingMode:{ideal:'environment'},width:{ideal:640}},audio:false});}
-  catch(e){$('stCam').textContent='카메라: 오류';$('list').textContent=e.name==='NotAllowedError'?'카메라 권한이 거부되었습니다. 설정에서 허용해 주세요':'카메라를 연결할 수 없습니다';return;}
-  vid.srcObject=stream;stream.getVideoTracks()[0].onended=()=>{stopCam();$('list').textContent='영상이 중단되었습니다. 다시 시작해 주세요';};
-  await vid.play();try{await navigator.wakeLock.request('screen');}catch(e){}
-  running=true;lastFrame=performance.now();$('stCam').textContent='카메라: 켜짐';$('bCam').textContent='카메라 정지';$('bCam').classList.add('on');
-  say('안내를 시작합니다','start',1);await loadModel();tick();startSpace();}
-function stopCam(){running=false;clearTimeout(timer);clearTimeout(sched);segRes=depRes=null;cnt=[0,0,0];if(stream)stream.getTracks().forEach(t=>t.stop());stream=null;vid.srcObject=null;oc.clearRect(0,0,ov.width,ov.height);
-  speechSynthesis.cancel();queue=[];speaking=false;tracks=[];$('stCam').textContent='카메라: 꺼짐';$('bCam').textContent='카메라 시작';$('bCam').classList.remove('on');}
-$('bCam').onclick=()=>running?stopCam():startCam();
-$('bVoice').onclick=()=>{voiceOn=!voiceOn;$('bVoice').textContent=voiceOn?'음성 켜짐':'음성 꺼짐';$('bVoice').classList.toggle('on',voiceOn);if(!voiceOn){speechSynthesis.cancel();queue=[];speaking=false;}};
-setInterval(()=>{if(running&&model&&performance.now()-lastFrame>5000){$('list').textContent='영상 중단 감지: 카메라를 다시 시작합니다';stopCam();startCam();lastFrame=performance.now();}},2000);
-document.addEventListener('visibilitychange',()=>{if(document.hidden&&running)stopCam();});
-loadModel();
 </script></body></html>
