@@ -34,7 +34,7 @@ window.addEventListener('unhandledrejection',function(e){var s=document.getEleme
 // SpaceAudio v0.2.1 — Depth Anything V2 Small + SegFormer-B0(ADE20K) 실제 추론. 접근물체/신호등은 미구현.
 let pipeline, RawImage;   // CDN 로드 실패 시에도 버튼이 동작하도록 지연 로드
 const $ = id => document.getElementById(id);
-const VERSION = 'v0.2.8';
+const VERSION = 'v0.2.9';
 const store = { get: k => { try { return localStorage.getItem(k); } catch (e) { return null; } }, set: (k, v) => { try { localStorage.setItem(k, v); } catch (e) {} } };
 let crashes = +(store.get('crashes') || 0), prevCrash = null;   // 이전 실행이 정상 종료되지 않았으면 '충돌'로 보고 점점 가볍게 시작
 if (store.get('running') === '1') { crashes++; store.set('crashes', crashes); prevCrash = store.get('last') || '기록 없음'; store.set('running', '0'); }
@@ -249,10 +249,12 @@ function stop() { running = false; store.set('running', '0'); stream?.getTracks(
   go.textContent = '보조 시작'; go.classList.remove('on'); st.textContent = '정지됨'; say('보조 기능을 정지합니다', 's', 0); }
 go.onclick = async () => {
   if (running) return stop();
+  // iOS: 기울기 센서 권한은 버튼 클릭 직후(await 이전)에 동기적으로 요청해야 함. 거부돼도 앱은 계속 시작(센서는 선택 기능)
+  const oriP = typeof DeviceOrientationEvent?.requestPermission === 'function' ? DeviceOrientationEvent.requestPermission().catch(() => 'denied') : null;
   try {
     if (!ac) initAudio(); await ac.resume();
     store.set('running', '1'); store.set('last', 'start');   // 로딩 중 충돌도 감지
-    if (typeof DeviceOrientationEvent?.requestPermission === 'function') await DeviceOrientationEvent.requestPermission();
+    if (oriP && (await oriP) !== 'granted') console.warn('기울기 센서 권한 없음 → 자세 기반 판단 비활성');
     addEventListener('deviceorientation', e => { beta = e.beta; });
     if (!depther) { st.textContent = '모델을 불러오는 중…'; say('모델을 불러옵니다', 'l', 0); await loadModels(); }
     fileMode ? await v.play() : await startCam();
